@@ -1,20 +1,28 @@
 # -*- coding: utf-8 -*-
 """
 Starsov Bot — покупка звёзд, Premium, Steam, партнёрская программа, игры
+С автоматической покупкой через MyStars API
 """
 
 import os
 import sqlite3
 import json
 import random
+import asyncio
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
+from mystars_faas import MyStarsClient
+
 # ========== КОНФИГУРАЦИЯ ==========
 TOKEN = "8856609164:AAGJ_Hnsc5eWbNoCxrUQIEYkuIYTWTPwYzc"
 ADMIN_ID = 5141751465  # твой Telegram ID
+MYSTARS_API_KEY = "faas_e629a8b74663a0b4bd43fc2b4793a2397c13077cd0c57dac8533419551781bc5"
+
+# Инициализируем клиент MyStars
+client = MyStarsClient.production(MYSTARS_API_KEY)
 
 # ========== БАЗА ДАННЫХ ==========
 DB_NAME = "starsov.db"
@@ -55,6 +63,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    print("✅ База данных инициализирована")
 
 # ========== РАБОТА С БАЗОЙ ==========
 def get_user(user_id):
@@ -74,7 +83,6 @@ def create_user(user_id, username, referrer_id=0):
         VALUES (?, ?, ?, ?)
     ''', (user_id, username, ref_code, referrer_id))
     if referrer_id:
-        # Начисляем 10% рефереру (как в боте)
         cur.execute('UPDATE users SET ref_balance = ref_balance + 0.1 WHERE user_id = ?', (referrer_id,))
         cur.execute('UPDATE users SET ref_count = ref_count + 1 WHERE user_id = ?', (referrer_id,))
     conn.commit()
@@ -163,16 +171,17 @@ def main_menu():
         [InlineKeyboardButton("👑 Телеграм Премиум", callback_data="buy_premium")],
         [InlineKeyboardButton("🎁 Пополнить Steam", callback_data="buy_steam")],
         [InlineKeyboardButton("👥 Партнерская Программа", callback_data="referral")],
+        [InlineKeyboardButton("🎮 Игры", callback_data="games")]
     ])
     return markup
 
 def payment_menu(order_type, amount, target_user=None):
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 СБП (Рубли) #1", callback_data=f"pay_sbp1_{order_type}_{amount}_{target_user or 'me'}")],
-        [InlineKeyboardButton("💳 СБП (Рубли) #2", callback_data=f"pay_sbp2_{order_type}_{amount}_{target_user or 'me'}")],
-        [InlineKeyboardButton("🪙 TON", callback_data=f"pay_ton_{order_type}_{amount}_{target_user or 'me'}")],
+        [InlineKeyboardButton("🪙 TON (авто)", callback_data=f"pay_ton_{order_type}_{amount}_{target_user or 'me'}")],
+        [InlineKeyboardButton("🤖 CryptoBot (авто)", callback_data=f"pay_cryptobot_{order_type}_{amount}_{target_user or 'me'}")],
+        [InlineKeyboardButton("💳 СБП #1", callback_data=f"pay_sbp1_{order_type}_{amount}_{target_user or 'me'}")],
+        [InlineKeyboardButton("💳 СБП #2", callback_data=f"pay_sbp2_{order_type}_{amount}_{target_user or 'me'}")],
         [InlineKeyboardButton("₿ Крипта / USDT", callback_data=f"pay_crypto_{order_type}_{amount}_{target_user or 'me'}")],
-        [InlineKeyboardButton("🤖 CryptoBot", callback_data=f"pay_cryptobot_{order_type}_{amount}_{target_user or 'me'}")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ])
     return markup
@@ -353,7 +362,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # ===== ОПЛАТА =====
+    # ===== ОПЛАТА (РЕАЛЬНАЯ ЧЕРЕЗ MYSTARS) =====
     if data.startswith("pay_"):
         parts = data.split("_")
         method = parts[1]
@@ -361,48 +370,110 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = parts[3]
         target = parts[4] if len(parts) > 4 else "me"
         
-        # Создаём заказ
+        # Создаём заказ в БД
         create_order(user_id, f"{order_type}_{amount}", amount)
         
-        # Отправляем реквизиты
-        if method == "sbp1":
-            text = f"💳 **Оплата по СБП #1**\n\n"
-            text += f"Заказ: {order_type} на {amount}\n"
-            text += f"Сумма: {amount*0.5} ₽\n\n"
-            text += "📱 **Номер карты:** 2200 1234 5678 9012\n"
-            text += "🏦 **Банк:** Т-Банк\n"
-            text += "👤 **Получатель:** Иванов И.И.\n\n"
-            text += "❗ Счет действителен 30 минут.\n"
-            text += "После оплаты пришлите чек в этот чат."
-        elif method == "sbp2":
-            text = f"💳 **Оплата по СБП #2**\n\n"
-            text += f"Заказ: {order_type} на {amount}\n"
-            text += f"Сумма: {amount*0.45} ₽\n\n"
-            text += "📱 **Номер карты:** 2200 9876 5432 1098\n"
-            text += "🏦 **Банк:** Сбербанк\n"
-            text += "👤 **Получатель:** Петров П.П.\n\n"
-            text += "❗ Счет действителен 30 минут.\n"
-            text += "После оплаты пришлите чек в этот чат."
-        elif method == "ton":
-            text = f"🪙 **Оплата TON**\n\n"
-            text += f"Заказ: {order_type} на {amount}\n"
-            text += f"Сумма: {amount*0.02} TON\n\n"
-            text += "📍 **Адрес для перевода:**\n"
-            text += "UQB... (ваш TON-адрес)\n\n"
-            text += "❗ Счет действителен 30 минут."
-        elif method == "crypto":
-            text = f"₿ **Оплата криптовалютой**\n\n"
-            text += f"Заказ: {order_type} на {amount}\n"
-            text += f"Сумма: {amount*0.015} USDT\n\n"
-            text += "📍 **Адрес USDT (TRC20):**\n"
-            text += "T... (ваш USDT-адрес)\n\n"
-            text += "❗ Счет действителен 30 минут."
-        else:  # cryptobot
-            text = f"🤖 **Оплата через CryptoBot**\n\n"
-            text += f"Заказ: {order_type} на {amount}\n\n"
-            text += "Перейдите в @CryptoBot и оплатите счёт."
+        # --- РЕАЛЬНЫЙ ВЫЗОВ MYSTARS API ДЛЯ TON И CRYPTOBOT ---
+        if method in ["ton", "cryptobot"]:
+            try:
+                # Определяем получателя
+                recipient = query.from_user.username or query.from_user.first_name
+                if target != "me" and target != user_id:
+                    recipient = str(target)
+                
+                # Проверяем, можно ли отправить звёзды
+                check = client.check_recipient(recipient, type="stars")
+                if not check.eligible:
+                    await query.edit_message_text(
+                        f"❌ Пользователь @{recipient} не может получить звёзды.\n"
+                        f"Причина: {check.telegram_message}",
+                        reply_markup=main_menu()
+                    )
+                    return
+                
+                # Получаем цену в TON
+                quote = client.get_pricing(type="stars", quantity=int(amount), payment_currency="ton")
+                
+                # Создаём заказ в MyStars
+                order = client.create_order(
+                    type="stars",
+                    recipient=recipient,
+                    quantity=int(amount),
+                    payment_currency="ton",
+                    callback_url="https://tgbot-zkm6.onrender.com/webhooks/mystars"  # Замени на свой URL
+                )
+                
+                text = f"🪙 **Оплата через {method.upper()}**\n\n"
+                text += f"Заказ: {order_type} на {amount} звёзд\n"
+                text += f"💰 **Сумма к оплате:** {order.payment.amount} TON\n"
+                text += f"📤 **Адрес для перевода:**\n`{order.payment.pay_to_address}`\n"
+                text += f"📝 **Комментарий:**\n`{order.payment.memo}`\n\n"
+                text += f"❗ Счёт действителен 30 минут.\n"
+                text += f"После оплаты звёзды поступят автоматически."
+                
+                # --- ОТСЛЕЖИВАНИЕ ОПЛАТЫ ---
+                async def check_payment():
+                    try:
+                        # Ждём 30 минут
+                        final_order = client.wait_for_order(order.id, timeout=1800)
+                        if final_order.status == "delivered":
+                            await context.bot.send_message(
+                                user_id,
+                                f"✅ {amount} звёзд успешно зачислены @{recipient}!"
+                            )
+                            # 10% рефереру
+                            ref_id = get_referrer_id(user_id)
+                            if ref_id:
+                                update_ref_balance(ref_id, float(order.payment.amount) * 0.1)
+                        else:
+                            await context.bot.send_message(
+                                user_id,
+                                f"⚠️ Статус заказа: {final_order.status}. Обратитесь в поддержку."
+                            )
+                    except Exception as e:
+                        await context.bot.send_message(
+                            ADMIN_ID,
+                            f"⚠️ Ошибка отслеживания заказа {order.id}: {e}"
+                        )
+                
+                # Запускаем проверку в фоне
+                asyncio.create_task(check_payment())
+                
+            except Exception as e:
+                text = f"❌ Ошибка при создании заказа: {e}\nПопробуйте позже или свяжитесь с поддержкой."
+                await query.edit_message_text(text, parse_mode="Markdown")
+                return
+        else:
+            # --- ОСТАВЛЯЕМ СТАРУЮ ЗАГЛУШКУ ДЛЯ СБП/КРИПТЫ ---
+            if method == "sbp1":
+                text = f"💳 **Оплата по СБП #1**\n\n"
+                text += f"Заказ: {order_type} на {amount}\n"
+                text += f"Сумма: {int(amount)*0.5} ₽\n\n"
+                text += "📱 **Номер карты:** 2200 1234 5678 9012\n"
+                text += "🏦 **Банк:** Т-Банк\n"
+                text += "👤 **Получатель:** Иванов И.И.\n\n"
+                text += "❗ Счет действителен 30 минут.\n"
+                text += "После оплаты пришлите чек в этот чат."
+            elif method == "sbp2":
+                text = f"💳 **Оплата по СБП #2**\n\n"
+                text += f"Заказ: {order_type} на {amount}\n"
+                text += f"Сумма: {int(amount)*0.45} ₽\n\n"
+                text += "📱 **Номер карты:** 2200 9876 5432 1098\n"
+                text += "🏦 **Банк:** Сбербанк\n"
+                text += "👤 **Получатель:** Петров П.П.\n\n"
+                text += "❗ Счет действителен 30 минут.\n"
+                text += "После оплаты пришлите чек в этот чат."
+            elif method == "crypto":
+                text = f"₿ **Оплата криптовалютой**\n\n"
+                text += f"Заказ: {order_type} на {amount}\n"
+                text += f"Сумма: {int(amount)*0.015} USDT\n\n"
+                text += "📍 **Адрес USDT (TRC20):**\n"
+                text += "T... (ваш USDT-адрес)\n\n"
+                text += "❗ Счет действителен 30 минут."
+            else:
+                text = f"❌ Неизвестный способ оплаты."
         
-        text += "\n\nПосле оплаты отправьте скриншот чека."
+        text += "\n\nПосле оплаты звёзды зачислятся автоматически (для TON/CryptoBot) или после проверки чека."
         
         await query.edit_message_text(
             text,
@@ -476,7 +547,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         success = random.random() < 0.4
         if success:
-            # 10% от приза идёт рефереру
             ref_id = get_referrer_id(user_id)
             if ref_id:
                 update_ref_balance(ref_id, int(prize) * 0.01)
@@ -539,7 +609,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Обработка покупки для друга
     if context.user_data.get('buy_for_friend'):
-        # Пытаемся найти пользователя по username или ID
         target = text.strip()
         context.user_data['buy_for_friend'] = False
         await update.message.reply_text(
@@ -554,7 +623,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Чек получен!\n"
             "Администратор проверит оплату и выполнит заказ в ближайшее время."
         )
-        # Уведомление админу
         await context.bot.send_message(
             ADMIN_ID,
             f"📤 Новый чек от @{update.effective_user.username or 'пользователя'}!\n"
@@ -579,7 +647,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
     
-    print("🚀 Starsov Bot запущен!")
+    print("🚀 Starsov Bot с MyStars API запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
